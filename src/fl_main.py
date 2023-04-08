@@ -26,7 +26,7 @@ def setup_seed(seed):
 
 
 def prepare_data(args, device):
-    csv_file_folder = r'CSV-03-11/03-11/kd_fl_split_by_label/X_train_Y_train'
+    csv_file_folder = r'CSV-03-11/03-11-V2/kd_fl_split_by_label/X_train_Y_train'
     train_loaders = [
         DataLoader(
             CSVDataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), device),
@@ -39,13 +39,13 @@ def prepare_data(args, device):
         #            batch_size=args.batch, shuffle=False)
 #        DataLoader(CSV24DDataset(r'CSV-03-11/03-11/fl_split_by_label/X_test_Y_test.csv', device),
 #                   batch_size=args.batch, shuffle=True)
-       DataLoader(CSVDataset(r'CSV-03-11/03-11/fl_split_by_label/X_test_Y_test.csv', device),
+       DataLoader(CSVDataset(r'CSV-03-11/03-11-V2/fl_split_by_label/X_test_Y_test.csv', device),
                   batch_size=args.batch, shuffle=True)
         for i in range(0, args.clientnum)
     ]
 
     test_loaders = [
-        DataLoader(CSVDataset(r'CSV-03-11/03-11/fl_split_by_label/X_test_Y_test.csv', device),
+        DataLoader(CSVDataset(r'CSV-03-11/03-11-V2/fl_split_by_label/X_test_Y_test.csv', device),
                    batch_size=args.batch, shuffle=False)
     ]
 
@@ -138,7 +138,7 @@ def public_dataset():
 def proxy_dataset():
     # randomly choose parts of the sample from each client, view these as the proxy dataset
     # serve for the following ensemble KD
-    csv_file = r'CSV-03-11/03-11/kd_fl_split_by_label/X_train_Y_train/proxy_data.csv'
+    csv_file = r'CSV-03-11/03-11-V2/kd_fl_split_by_label/X_train_Y_train/proxy_data.csv'
     proxy_dataloader = DataLoader(
         CSVDataset(csv_file, device),
         batch_size=args.batch, shuffle=False)
@@ -159,7 +159,15 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
         test_error = test(server_model, test_loader)
         print(f' Server model by simply average aggregation | Error Rate: {test_error * 100.:.2f} %.')
     
-    
+    # when test error is already low, do not use KD, just simple average aggregation
+    if test_error*100 < 1.5:
+        with torch.no_grad():
+            for key in server_model.state_dict().keys():
+                for client_idx in range(len(client_weights)):
+                    models[client_idx].state_dict()[key].data.copy_(server_model.state_dict()[key])
+        print(f'The server side model is already good by average aggregation. No need to use knowledge distillation for tuning.')
+        return server_model, models
+
     # use proxy dataset to generate knowledge
     # proxy_dataloader = public_dataset()
     proxy_dataloader = proxy_dataset()
@@ -192,6 +200,7 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
             soft_outputs = torch.concat((soft_outputs, output), dim=0)  # shape: [len(data), len(labels)]
         
     # calculate Kullback-Leibler divergence loss
+    print(f"Set temperature to {args.tmp}, learning rate for KL divergance to {args.lr_kd}.")
     T = args.tmp
     KL_loss = nn.KLDivLoss(reduction='batchmean', log_target=True)
     soft_outputs_log = F.log_softmax(soft_outputs / T, dim=1)
@@ -213,6 +222,10 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
             for client_idx in range(len(client_weights)):
                 models[client_idx].state_dict()[key].data.copy_(server_model.state_dict()[key])
 
+    # decay the temperature and learning rate of KD
+    args.lr_kd *= 0.7
+    args.tmp = (args.tmp-1.0) * 0.7 + 1.0
+
     return server_model, models
 
 
@@ -227,20 +240,19 @@ if __name__ == '__main__':
     # parser.add_argument('--wdecay', type=float, default=5e-4, help='learning rate')
     parser.add_argument('--batch', type=int, default=256, help='batch size')
     parser.add_argument('--iters', type=int, default=50, help='iterations for communication')
-    parser.add_argument('--wk_iters', type=int, default=1,
+    parser.add_argument('--wk_iters', type=int, default=2,
                         help='optimization iters in local worker between communication')
     parser.add_argument('--mode', type=str, default='fedavg', help='fedavg')
     parser.add_argument('--save_path', type=str, default='checkpoint/mnist', help='path to save the checkpoint')
     parser.add_argument('--resume', action='store_true', help='resume training from the save path checkpoint')
 
-    parser.add_argument('--clientnum', type=int, default=6, help='client number')
+    parser.add_argument('--clientnum', type=int, default=9, help='client number')
     parser.add_argument('--setnum', type=int, default=10, help='set number per client has')
 
-    parser.add_argument('--classnum', type=int, default=8, help='class num')  # not used
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     
     parser.add_argument('--KD', action='store_true', help='whether to use the ensemble knowledge distillation during the aggregation')
-    parser.add_argument('--tmp', type=int, default=1, help='temperature for the KD, typically initialize T>=1')
+    parser.add_argument('--tmp', type=int, default=1.1, help='temperature for the KD, typically initialize T>=1')
     parser.add_argument('--lr_kd', type=int, default=0.001, help='learning rate for the knowledge distillation')
 
     parser.add_argument('--noniid', action='store_true', help='noniid sampling')  # not used
