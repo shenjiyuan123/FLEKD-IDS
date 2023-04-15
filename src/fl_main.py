@@ -11,11 +11,12 @@ import copy
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import wandb
+import random
 
 import numpy as np
 
 from model import MyModel
-from util import CSVDataset, calc_performance, CSV24DDataset, CSV79DDataset
+from util import CSVDataset, CSV_noniid_Dataset, calc_performance, CSV24DDataset, CSV79DDataset, Dirichlet_Dataset
 
 
 def setup_seed(seed):
@@ -27,25 +28,64 @@ def setup_seed(seed):
 
 def prepare_data(args, device):
     csv_file_folder = r'CSV-03-11/03-11-V2/kd_fl_split_by_label/X_train_Y_train'
-    train_loaders = [
-        DataLoader(
-            CSVDataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), device),
-            batch_size=args.batch, shuffle=True)
-        for i in range(0, args.clientnum)
-    ]
+    if not args.noniid:
+        raise NotImplementedError
+    else:
+        train_loaders = Dirichlet_Dataset(csv_file_folder, args)
+    '''
+    if not args.noniid:
+        train_loaders = [
+            DataLoader(
+                CSVDataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), device, randomly_drop_frac=False),
+                batch_size=args.batch, shuffle=True)
+            for i in range(0, args.clientnum)
+        ]
+    else:
+        drop_labels = []
+        if args.noniid_strategy == 'random':
+            labels_ls = list(range(args.classnum)) + list(range(args.classnum))  # because the client num larger than the label num, use this for easy sample.
+            drop = random.sample(labels_ls, args.clientnum)
+            drop_labels = [[i] for i in drop]
+            print(f"For randomly sample non-iid dataset, each client drop the label by the sequence of {drop_labels}.")
+            train_loaders = [
+                DataLoader(
+                    CSV_noniid_Dataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), drop_labels[i], device),
+                    batch_size=args.batch, shuffle=True)
+                for i in range(0, args.clientnum)
+            ]
+
+        elif args.noniid_strategy == 'serial':
+            labels_ls = list(range(args.classnum)) + list(range(args.classnum))
+            drop_labels = [[i] for n,i in enumerate(labels_ls) if n<args.clientnum]
+            print(f"For serially sample non-iid dataset, each client drop the label from small to large, according to the sequence of {drop_labels}.")
+            train_loaders = [
+                DataLoader(
+                    CSV_noniid_Dataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), drop_labels[i], device),
+                    batch_size=args.batch, shuffle=True)
+                for i in range(0, args.clientnum)
+            ]
+        elif args.noniid_strategy == 'unbalanced':
+            train_loaders = [
+            DataLoader(
+                CSVDataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), device, randomly_drop_frac=0.3),
+                batch_size=args.batch, shuffle=True)
+            for i in range(0, args.clientnum)
+        ]
+    '''       
+
 
     validation_loaders = [
         # DataLoader(CSVDataset(r'CSV-03-11/03-11/fl_split_by_label/X_test_Y_test.csv', device),
         #            batch_size=args.batch, shuffle=False)
 #        DataLoader(CSV24DDataset(r'CSV-03-11/03-11/fl_split_by_label/X_test_Y_test.csv', device),
 #                   batch_size=args.batch, shuffle=True)
-       DataLoader(CSVDataset(r'CSV-03-11/03-11-V2/fl_split_by_label/X_test_Y_test.csv', device),
+       DataLoader(CSVDataset(r'CSV-03-11/03-11-V2/fl_split_by_label/X_test_Y_test.csv', device, randomly_drop_frac=False),
                   batch_size=args.batch, shuffle=True)
         for i in range(0, args.clientnum)
     ]
 
     test_loaders = [
-        DataLoader(CSVDataset(r'CSV-03-11/03-11-V2/fl_split_by_label/X_test_Y_test.csv', device),
+        DataLoader(CSVDataset(r'CSV-03-11/03-11-V2/fl_split_by_label/X_test_Y_test.csv', device, randomly_drop_frac=False),
                    batch_size=args.batch, shuffle=False)
     ]
 
@@ -129,7 +169,7 @@ def public_dataset():
     idx = 0
     csv_file_folder = r'CSV-03-11/03-11/fl_split_by_label/X_train_Y_train'
     proxy_dataloader = DataLoader(
-        CSVDataset(os.path.join(csv_file_folder, "client_" + str(idx) + ".csv"), device),
+        CSVDataset(os.path.join(csv_file_folder, "client_" + str(idx) + ".csv"), device, randomly_drop_frac=False),
         batch_size=args.batch, shuffle=False)
     
     return proxy_dataloader
@@ -140,8 +180,8 @@ def proxy_dataset():
     # serve for the following ensemble KD
     csv_file = r'CSV-03-11/03-11-V2/kd_fl_split_by_label/X_train_Y_train/proxy_data.csv'
     proxy_dataloader = DataLoader(
-        CSVDataset(csv_file, device),
-        batch_size=args.batch, shuffle=False)
+        CSVDataset(csv_file, device, randomly_drop_frac=False),
+        batch_size=args.batch, shuffle=True)
     
     return proxy_dataloader
     
@@ -154,13 +194,24 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
             temp += client_weight * models[idx].state_dict()[key]
         server_model.state_dict()[key].data.copy_(temp)
         
-    # test after average aggregation
+    # test after average aggregation, currently only gots one test_loader
     for _, test_loader in enumerate(test_loaders):
         test_error = test(server_model, test_loader)
         print(f' Server model by simply average aggregation | Error Rate: {test_error * 100.:.2f} %.')
-    
+        
+        # throught the proxy dataset, test the performance of each client, get the confidence of various clients for following distillation
+        client_accs = list()
+        for model in models:
+            client_acc = 1 - test(model, test_loader)
+            client_accs.append(client_acc)
+        client_accs = torch.tensor(client_accs)
+        distill_weights = F.softmax(client_accs / 0.4, dim=0).to(device=args.device)
+        
+        print(client_accs)
+        print(distill_weights)
+        
     # when test error is already low, do not use KD, just simple average aggregation
-    if test_error*100 < 1.5:
+    if test_error*100 < 0.1:
         with torch.no_grad():
             for key in server_model.state_dict().keys():
                 for client_idx in range(len(client_weights)):
@@ -171,7 +222,48 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
     # use proxy dataset to generate knowledge
     # proxy_dataloader = public_dataset()
     proxy_dataloader = proxy_dataset()
+    KL_loss = nn.KLDivLoss(reduction='sum', log_target=True)
+    kd_optimizer = optim.Adam(params=server_model.parameters(), lr=args.lr_kd)
     
+    print(f"Set temperature to {args.tmp}, learning rate for KL divergance to {args.lr_kd}.")
+    
+    for epoch in range(args.distill_epochs):
+        for step, data in enumerate(proxy_dataloader):
+            x, y = data[0], data[1]
+            # calculate teacher knowledge
+            with torch.no_grad():
+                for idx, model in enumerate(models):
+                    logists = torch.unsqueeze(model(x), dim=0)
+                    if idx == 0:
+                        soft_labels = logists
+                    else:
+                        soft_labels = torch.concat([soft_labels, logists], dim=0)
+            # add weights for each clients
+            soft_labels.transpose_(0, 1)
+            # print(distill_weights.shape, soft_labels.shape)
+            knowledge = torch.matmul(distill_weights, soft_labels)
+            print(knowledge.shape)
+
+            # navie average client weights
+            # knowledge = sum(soft_labels) / len(soft_labels)
+
+            # calculate student logits
+            output = server_model(x)
+
+            T = args.tmp
+            soft_outputs_log = F.log_softmax(output / T, dim=1)
+            knowledge_log = F.log_softmax(knowledge / T, dim=1)
+            soft_loss = KL_loss(soft_outputs_log, knowledge_log)
+            
+            print(f"The knowledge distillation loss is: {soft_loss}.")
+            print(f"Some example knowledge is like: {F.softmax(knowledge[0:2] / T, dim=1), y[0:2]}.")
+
+            kd_optimizer.zero_grad()
+            soft_loss.backward()
+            kd_optimizer.step()
+        
+            
+    '''
     with torch.no_grad():
         for idx, model in enumerate(models):
             for step, data in enumerate(proxy_dataloader):
@@ -189,6 +281,7 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
                 all_model_soft = torch.concat((all_model_soft, soft_labels), dim=0)
         
     knowledge = torch.mean(all_model_soft, dim=0)   # shape: [len(data), len(labels)]
+    # knowledge = all_model_soft[2]
         
     # calculate student outputs
     for step, data in enumerate(proxy_dataloader):
@@ -197,12 +290,12 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
         if step==0:
             soft_outputs = output
         else:
-            soft_outputs = torch.concat((soft_outputs, output), dim=0)  # shape: [len(data), len(labels)]
-        
+            soft_outputs = torch.concat((soft_outputs, output), dim=0)  # shape: [len(data), len(labels)] 
+    
     # calculate Kullback-Leibler divergence loss
     print(f"Set temperature to {args.tmp}, learning rate for KL divergance to {args.lr_kd}.")
     T = args.tmp
-    KL_loss = nn.KLDivLoss(reduction='batchmean', log_target=True)
+    KL_loss = nn.KLDivLoss(reduction='sum', log_target=True)
     soft_outputs_log = F.log_softmax(soft_outputs / T, dim=1)
     knowledge_log = F.log_softmax(knowledge / T, dim=1)
     soft_loss = KL_loss(soft_outputs_log, knowledge_log)
@@ -215,6 +308,7 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
     kd_optimizer.zero_grad()
     soft_loss.backward()
     kd_optimizer.step()
+    '''
     
     # dispatch the server model to all clients
     with torch.no_grad():
@@ -223,8 +317,11 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
                 models[client_idx].state_dict()[key].data.copy_(server_model.state_dict()[key])
 
     # decay the temperature and learning rate of KD
-    args.lr_kd *= 0.7
-    args.tmp = (args.tmp-1.0) * 0.7 + 1.0
+    # args.lr_kd *= 0.7
+    # if args.tmp>1.0:
+    #     args.tmp = (args.tmp-1.0) * 0.7 + 1.0
+    # else:
+    #     args.tmp = 1.0 - (1.0-args.tmp) * 0.7
 
     return server_model, models
 
@@ -240,7 +337,7 @@ if __name__ == '__main__':
     # parser.add_argument('--wdecay', type=float, default=5e-4, help='learning rate')
     parser.add_argument('--batch', type=int, default=256, help='batch size')
     parser.add_argument('--iters', type=int, default=50, help='iterations for communication')
-    parser.add_argument('--wk_iters', type=int, default=2,
+    parser.add_argument('--wk_iters', type=int, default=1,
                         help='optimization iters in local worker between communication')
     parser.add_argument('--mode', type=str, default='fedavg', help='fedavg')
     parser.add_argument('--save_path', type=str, default='checkpoint/mnist', help='path to save the checkpoint')
@@ -248,16 +345,22 @@ if __name__ == '__main__':
 
     parser.add_argument('--clientnum', type=int, default=9, help='client number')
     parser.add_argument('--setnum', type=int, default=10, help='set number per client has')
+    parser.add_argument('--classnum', type=int, default=7, help='class num') 
 
     parser.add_argument('--seed', type=int, default=0, help='random seed')
     
     parser.add_argument('--KD', action='store_true', help='whether to use the ensemble knowledge distillation during the aggregation')
-    parser.add_argument('--tmp', type=int, default=1.1, help='temperature for the KD, typically initialize T>=1')
+    parser.add_argument('--distill_epochs', type=int, default=1, help='epochs for the distillation process')
+    parser.add_argument('--tmp', type=int, default=2, help='temperature for the KD, typically initialize T>=1')
     parser.add_argument('--lr_kd', type=int, default=0.001, help='learning rate for the knowledge distillation')
 
-    parser.add_argument('--noniid', action='store_true', help='noniid sampling')  # not used
+    parser.add_argument('--noniid', action='store_true', help='noniid sampling')
+    parser.add_argument('--alpha', type=float, default=1.0, help='dirichlet distribution for dataset sample')
+    parser.add_argument('--noniid_strategy', choices=['random', 'multiple', 'serial', 'unbalanced'], help='how to generate noniid dataset, using three sample strateies') 
 
     args = parser.parse_args()
+    
+    args.device = device
     print(args)
     
     wandb.init(sync_tensorboard=False,
@@ -279,7 +382,7 @@ if __name__ == '__main__':
                                  args.seed) + str(args.noniid))
 
     # server model and ce loss
-    server_model = MyModel(input_dim=82, output_dim=7).to(device)
+    server_model = MyModel(input_dim=82, output_dim=args.classnum).to(device)
     loss_fun = loss_func = nn.CrossEntropyLoss().cuda()
     # loss_fun = loss_func = nn.NLLLoss().cuda()
 
@@ -336,7 +439,7 @@ if __name__ == '__main__':
         
         # start testing
         for test_idx, test_loader in enumerate(validation_loaders):
-            test_error = test(models[test_idx], test_loader)
+            test_error = test(server_model, test_loader)
             this_test_error.append(test_error)
             if args.KD:
                 print(' Server model after knowledge distillation | Error Rate: {:.2f} %'.format(test_error * 100.))
