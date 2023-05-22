@@ -7,4 +7,5 @@
 #SBATCH --output /export/home2/jiyuan/CIC2019/outs/flmain.out
 
 
-CUDA_VISIBLE_DEVICES=0 python src/fl_main.py --KD
+# CUDA_VISIBLE_DEVICES=0 python src/fl_main.py --KD --noniid --noniid_strategy serial
+CUDA_VISIBLE_DEVICES=0 python src/fl_main.py --KD --drop_label --drop_strategy serial --distill_epochs 2 --wk_iters 15 --iters 1

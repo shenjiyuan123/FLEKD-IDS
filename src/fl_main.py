@@ -29,11 +29,6 @@ def setup_seed(seed):
 def prepare_data(args, device):
     csv_file_folder = r'CSV-03-11/03-11-V2/kd_fl_split_by_label/X_train_Y_train'
     if not args.noniid:
-        raise NotImplementedError
-    else:
-        train_loaders = Dirichlet_Dataset(csv_file_folder, args)
-    '''
-    if not args.noniid:
         train_loaders = [
             DataLoader(
                 CSVDataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), device, randomly_drop_frac=False),
@@ -41,8 +36,13 @@ def prepare_data(args, device):
             for i in range(0, args.clientnum)
         ]
     else:
+        train_loaders = Dirichlet_Dataset(csv_file_folder, 0, 3, args)
+        train_loaders.extend(Dirichlet_Dataset(csv_file_folder, 1, 3, args))
+        train_loaders.extend(Dirichlet_Dataset(csv_file_folder, 2, 3, args))
+    
+    if args.drop_label:
         drop_labels = []
-        if args.noniid_strategy == 'random':
+        if args.drop_strategy == 'random':
             labels_ls = list(range(args.classnum)) + list(range(args.classnum))  # because the client num larger than the label num, use this for easy sample.
             drop = random.sample(labels_ls, args.clientnum)
             drop_labels = [[i] for i in drop]
@@ -54,7 +54,7 @@ def prepare_data(args, device):
                 for i in range(0, args.clientnum)
             ]
 
-        elif args.noniid_strategy == 'serial':
+        elif args.drop_strategy == 'serial':
             labels_ls = list(range(args.classnum)) + list(range(args.classnum))
             drop_labels = [[i] for n,i in enumerate(labels_ls) if n<args.clientnum]
             print(f"For serially sample non-iid dataset, each client drop the label from small to large, according to the sequence of {drop_labels}.")
@@ -64,14 +64,8 @@ def prepare_data(args, device):
                     batch_size=args.batch, shuffle=True)
                 for i in range(0, args.clientnum)
             ]
-        elif args.noniid_strategy == 'unbalanced':
-            train_loaders = [
-            DataLoader(
-                CSVDataset(os.path.join(csv_file_folder, "client_" + str(i) + ".csv"), device, randomly_drop_frac=0.3),
-                batch_size=args.batch, shuffle=True)
-            for i in range(0, args.clientnum)
-        ]
-    '''       
+
+    
 
 
     validation_loaders = [
@@ -205,13 +199,13 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
             client_acc = 1 - test(model, test_loader)
             client_accs.append(client_acc)
         client_accs = torch.tensor(client_accs)
-        distill_weights = F.softmax(client_accs / 0.4, dim=0).to(device=args.device)
+        distill_weights = F.softmax(client_accs / args.weights_tmp, dim=0).to(device=args.device)
         
         print(client_accs)
         print(distill_weights)
         
     # when test error is already low, do not use KD, just simple average aggregation
-    if test_error*100 < 0.1:
+    if test_error*100 < 2:
         with torch.no_grad():
             for key in server_model.state_dict().keys():
                 for client_idx in range(len(client_weights)):
@@ -317,17 +311,17 @@ def distillation_communicate(args, server_model, models, client_weights, test_lo
                 models[client_idx].state_dict()[key].data.copy_(server_model.state_dict()[key])
 
     # decay the temperature and learning rate of KD
-    # args.lr_kd *= 0.7
+    args.lr_kd *= 0.95
     # if args.tmp>1.0:
-    #     args.tmp = (args.tmp-1.0) * 0.7 + 1.0
+    #     args.tmp = (args.tmp-1.0) * 0.95 + 1.0
     # else:
-    #     args.tmp = 1.0 - (1.0-args.tmp) * 0.7
+    #     args.tmp = 1.0 - (1.0-args.tmp) * 0.95
 
     return server_model, models
 
 
 if __name__ == '__main__':
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     print('Device:', device, '\n')
     parser = argparse.ArgumentParser()
@@ -336,8 +330,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     # parser.add_argument('--wdecay', type=float, default=5e-4, help='learning rate')
     parser.add_argument('--batch', type=int, default=256, help='batch size')
-    parser.add_argument('--iters', type=int, default=50, help='iterations for communication')
-    parser.add_argument('--wk_iters', type=int, default=1,
+    parser.add_argument('--iters', type=int, default=30, help='iterations for communication')
+    parser.add_argument('--wk_iters', type=int, default=3,
                         help='optimization iters in local worker between communication')
     parser.add_argument('--mode', type=str, default='fedavg', help='fedavg')
     parser.add_argument('--save_path', type=str, default='checkpoint/mnist', help='path to save the checkpoint')
@@ -347,16 +341,18 @@ if __name__ == '__main__':
     parser.add_argument('--setnum', type=int, default=10, help='set number per client has')
     parser.add_argument('--classnum', type=int, default=7, help='class num') 
 
-    parser.add_argument('--seed', type=int, default=0, help='random seed')
+    parser.add_argument('--seed', type=int, default=46, help='random seed')
     
     parser.add_argument('--KD', action='store_true', help='whether to use the ensemble knowledge distillation during the aggregation')
     parser.add_argument('--distill_epochs', type=int, default=1, help='epochs for the distillation process')
-    parser.add_argument('--tmp', type=int, default=2, help='temperature for the KD, typically initialize T>=1')
+    parser.add_argument('--weights_tmp', type=int, default=0.5, help='temperature for the clients weight balance')
+    parser.add_argument('--tmp', type=int, default=1.5, help='temperature for the KD, typically initialize T>=1')
     parser.add_argument('--lr_kd', type=int, default=0.001, help='learning rate for the knowledge distillation')
 
     parser.add_argument('--noniid', action='store_true', help='noniid sampling')
-    parser.add_argument('--alpha', type=float, default=1.0, help='dirichlet distribution for dataset sample')
-    parser.add_argument('--noniid_strategy', choices=['random', 'multiple', 'serial', 'unbalanced'], help='how to generate noniid dataset, using three sample strateies') 
+    parser.add_argument('--alpha', type=float, default=1, help='dirichlet distribution for dataset sample')
+    parser.add_argument('--drop_label', action='store_true', help='whether to drop one label for each client') 
+    parser.add_argument('--drop_strategy', choices=['random', 'serial'], help='how to drop label') 
 
     args = parser.parse_args()
     
@@ -413,13 +409,15 @@ if __name__ == '__main__':
     training_loss_log = []
     error_rate_log = []
 
+    lr = args.lr
     # start training
     for a_iter in range(args.iters):
         # record training loss and test error rate
         this_test_error = []
         this_train_loss = []
 
-        optimizers = [optim.Adam(params=models[idx].parameters(), lr=args.lr) for idx in range(client_num)]
+        optimizers = [optim.Adam(params=models[idx].parameters(), lr=lr) for idx in range(client_num)]
+        lr *= 0.95
 
         for wi in range(args.wk_iters): 
             print("============ Train epoch {} ============".format(wi + 1 + a_iter * args.wk_iters))
@@ -430,6 +428,11 @@ if __name__ == '__main__':
                 print(' {:<8s}| Train Loss: {:.4f}'.format(clients[client_idx], train_loss))
 
                 this_train_loss.append(train_loss)
+                
+        # abalation
+        for ii in range(9):
+            print(f"********** Client {ii} ************")
+            calc_performance(models[ii], validation_loaders[0])
 
         # aggregation
         if args.KD:

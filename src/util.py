@@ -1,18 +1,20 @@
 from torch.utils.data import Dataset, DataLoader
 import torch
 import pandas as pd
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix, classification_report, precision_score, recall_score, f1_score, precision_recall_curve
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-def Dirichlet_Dataset(dirpath, args):
-    n_clients = args.clientnum
+def Dirichlet_Dataset(dirpath, split_num, subset_num, args):
+    n_clients = subset_num
     n_classes  = args.classnum
     alpha = args.alpha
-    for i in range(n_clients):
+    start = split_num*subset_num
+    end   = (split_num+1)*subset_num
+    for i in range(start, end):
         filepath = os.path.join(dirpath, "client_" + str(i) + ".csv")
-        if i==0:
+        if i==start:
             data = pd.read_csv(filepath)
         else:
             data = pd.concat([data, pd.read_csv(filepath)])
@@ -43,10 +45,29 @@ def Dirichlet_Dataset(dirpath, args):
     plt.figure(figsize=(12,6))
     plt.hist([labels[idc]for idc in client_idcs], stacked=True, 
             bins=np.arange(min(labels)-0.5, max(labels) + 1.5, 1),
-            label=["Client {}".format(i) for i in range(n_clients)], rwidth=0.5)
+            label=["Client {}".format(i) for i in range(start,end)], rwidth=0.5)
     plt.xticks(np.arange(n_classes), ['0','1','2','3','4','5','6'])
     plt.legend()
     plt.savefig('sample.pdf')
+    
+    '''
+    # 展示不同client上的label分布
+    plt.figure(figsize=(20, 6))  # 3
+    label_distribution = [[] for _ in range(n_clients)]
+    for c_id, idc in enumerate(client_idcs):
+        for idx in idc:
+            label_distribution[labels[idx]].append(c_id)
+
+    plt.hist(label_distribution, stacked=True,
+                bins=np.arange(-0.5, n_clients + 1.5, 1),
+                label=['0','1','2','3','4','5','6'], rwidth=0.5)
+    plt.xticks(np.arange(n_clients), ["Client %d" %
+                c_id for c_id in range(n_clients)])
+    plt.ylabel("Number of samples")
+    plt.xlabel("Client ID")
+    plt.legend()
+    plt.title("Display Label Distribution on Different Clients")
+    '''
 
     print(data, client_idcs)
     train_loaders = list()
@@ -172,5 +193,6 @@ def calc_performance(model, loader):
     predictions = predictions.cpu().numpy()
     print(confusion_matrix(gt, predictions))
     print(classification_report(gt, predictions, digits=4))
+    print(f"Precision: {precision_score(gt,predictions,average='weighted')}, Recall: {recall_score(gt,predictions,average='weighted')}, F1-score: {f1_score(gt,predictions,average='weighted')}")
     # return confusion_matrix(loader.dataset.Y, predictions), classification_report(loader.dataset.Y, predictions)
 
