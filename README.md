@@ -2,6 +2,7 @@
 
 Official implement of paper "Effective Federated Learning Using Ensemble Knowledge Distillation for Intrusion Detection in Heterogeneous Internet-of-Things Networks".
 
+[paper](FLEKD-IDS.pdf)
 
 ## Abstract
 
